@@ -1,0 +1,75 @@
+pipeline {
+    agent any
+
+    environment {
+        GITHUB_REPO_URL = "https://github.com/aniket-jagadale/E-commerce-website-deployment-using-jenkinsCICD-Terraform.git"
+        GIT_BRANCH      = "main"
+        SSH_CRED_ID     = "web-key"
+        EC2_IP          = "52.23.209.168"
+        REMOTE_USER     = "ubuntu"
+        APP_PATH        = "/opt/ecom-app"
+        PROJECT_DIR     = "Jtproject"
+    }
+
+    stages {
+        stage('Checkout Code') {
+            steps {
+                echo "Cloning ${GITHUB_REPO_URL} (branch: ${GIT_BRANCH})"
+                git url: "${GITHUB_REPO_URL}", branch: "${GIT_BRANCH}"
+            }
+        }
+
+        stage('Build with Maven') {
+            steps {
+                echo "Running Maven Build (Tests Skipped) in ${PROJECT_DIR}..."
+                dir("${PROJECT_DIR}") {
+                    sh "mvn -B clean package -DskipTests"
+                }
+            }
+            post {
+                success {
+                    archiveArtifacts artifacts: "${PROJECT_DIR}/target/*.jar", fingerprint: true
+                }
+            }
+        }
+
+        stage('Deploy to EC2') {
+            steps {
+                echo "Deploying application to EC2: ${EC2_IP}"
+                sshagent(credentials: [SSH_CRED_ID]) {
+                    script {
+                        def jarFile = sh(script: "ls ${PROJECT_DIR}/target/*.jar 2>/dev/null | head -n 1 || true", returnStdout: true).trim()
+                        if (!jarFile) {
+                            error "No JAR file found in ${PROJECT_DIR}/target. Build might have failed."
+                        }
+                        echo "JAR Found: ${jarFile}"
+
+                        // create remote dir and set ownership, then copy jar
+                        sh """
+                            ssh -o StrictHostKeyChecking=no ${REMOTE_USER}@${EC2_IP} 'sudo mkdir -p ${APP_PATH} && sudo chown ${REMOTE_USER}:${REMOTE_USER} ${APP_PATH} || true'
+                            scp -o StrictHostKeyChecking=no "${jarFile}" ${REMOTE_USER}@${EC2_IP}:"${APP_PATH}/app.jar"
+                        """
+
+                        // restart service (if exists)
+                        sh """
+                            ssh -o StrictHostKeyChecking=no ${REMOTE_USER}@${EC2_IP} 'sudo systemctl restart ecom.service || echo \"service restart failed\"'
+                            ssh -o StrictHostKeyChecking=no ${REMOTE_USER}@${EC2_IP} 'sudo systemctl status ecom.service --no-pager || true'
+                        """
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "🎉 Pipeline SUCCESS — Application deployed to EC2 ${EC2_IP}"
+        }
+        failure {
+            echo "❌ Pipeline FAILED — Check console output"
+        }
+        always {
+            deleteDir()
+        }
+    }
+}
